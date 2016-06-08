@@ -1,0 +1,7 @@
+<launch>
+
+  <node pkg="irobot_prj" name="robot" output="screen" type="robot.py" cwd="src"/>
+
+
+
+</launch>

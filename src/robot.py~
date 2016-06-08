@@ -1,0 +1,179 @@
+#!/usr/bin/env python
+
+import rospy
+import cv2
+import rospkg
+from std_msgs.msg import UInt8, String
+from geometry_msgs.msg import Twist, Vector3
+from ros_myo.msg import MyoArm
+import PIL.Image
+import struct
+import math
+import os
+import numpy as np
+import sys
+from sensor_msgs.msg import *
+import serial
+from code import interact
+import time
+
+
+
+from scipy.interpolate import interp1d
+
+class Robot():
+
+	def __init__(self):
+		rospy.init_node("robot")
+		self.unlocked = False
+		print "hi"
+		self.casc_file = "haarcascade_frontalface_default.xml"
+
+		self.connection = serial.Serial('/dev/ttyUSB0', baudrate=115200, timeout=1)
+
+		start_command = self.convert('128')
+		safe_command = self.convert('131')
+		self.beep_command = self.convert('140 3 1 64 16 141 5')
+		shutdown_command = self.convert('173')
+
+		self.connection.write(shutdown_command)
+		self.connection.write(start_command)
+		self.connection.write(safe_command)
+		
+
+		self.fC = cv2.CascadeClassifier(self.casc_file)
+
+		self.predictor = cv2.createLBPHFaceRecognizer()
+		
+		rospack = rospkg.RosPack()
+
+		self.own_path = "train"
+		
+		self.all_image_locs = [os.path.join(self.own_path, item) for item in os.listdir(self.own_path)]
+
+		self.list_all_faces_images = []
+		
+		self.all_labels = []
+		self.train()
+
+		
+
+		self.predictor.train(self.list_all_faces_images , np.array(self.all_labels))
+	
+		self.checkImage()
+
+   		rospy.Subscriber("myo_gest", UInt8, self.got_gest)
+		rospy.Subscriber("myo_imu", Imu, self.got_imu)
+
+		self.m = interp1d([-1.0 , 1.0] , [-1,501])
+
+		self.connection.write(shutdown_command)
+		self.connection.close()
+		self.speed = 10.0
+		rospy.spin()
+
+	def convert(self, inPut):
+		command = ''
+		for item in inPut.split():
+			command += chr(int(item))
+		return command
+
+	
+
+	def checkImage(self):
+		path2 = "test"
+		test_images = [os.path.join(path2, item) for item in os.listdir(path2)]
+
+		for im_path in test_images:
+
+			curr_image_gray = PIL.Image.open(im_path).convert('L')
+			np_array = np.array(curr_image_gray , 'uint8')
+			
+			all_faces = self.fC.detectMultiScale(np_array)
+			#print all_faces
+
+
+
+			for (x , y , width , height) in all_faces:
+				pred_value, confidence = self.predictor.predict(np_array[y: y + height, x: x + width])
+				if self.unlocked == True:
+					break
+				
+				if confidence >= 10:
+					self.unlocked = True
+					print "UNLOCKED *****************************************************************************"
+					self.connection.write(self.beep_command)
+					break
+
+		
+		if self.unlocked == False:
+			print "LOCKED ******************************** Shutting Down"
+			rospy.signal_shutdown(1)
+	
+	
+	def train(self):
+		for im_path in self.all_image_locs:
+
+			curr_image_gray = PIL.Image.open(im_path).convert('L')
+			np_array = np.array(curr_image_gray , 'uint8')
+
+			all_faces = self.fC.detectMultiScale(np_array)
+			for (x , y , width , height) in all_faces:
+
+				self.list_all_faces_images.append(np_array[y:y+height , x:x+width])
+				print im_path.split(".")[0].split("/")[1]
+
+
+				self.all_labels.append(int(im_path.split(".")[0].split("/")[1]))
+				cv2.waitKey(100)
+
+			
+
+	def drive_cust(self,vel,rot):
+		self.drive(vel,rot)
+	
+
+	def drive(self , velocity , rotation):
+		left_speed = sorted([-500, velocity + rotation, 500])[1]
+    		right_speed = sorted([-500, velocity - rotation, 500])[1]
+
+
+   		command = struct.pack('>Bhh', 145, left_speed, right_speed)
+
+		self.connection.write(command)
+
+
+
+	def got_imu(self, data):
+		#print "IMU" , data.linear_acceleration.x
+		#print float(self.m(data.linear_acceleration.x))
+
+
+
+		if data.linear_acceleration.x >= 0 and data.linear_acceleration.x <= 50:
+			self.speed = float(self.m(data.linear_acceleration.x))
+
+	def got_gest(self, data):
+		print data
+		
+		if self.unlocked == True:
+			if data.data == 4:
+				self.drive_cust(self.speed,0)
+			elif data.data == 1:
+				self.drive_cust(-self.speed,0)
+			elif data.data == 2:
+				self.drive_cust(0,self.speed)
+			elif data.data == 3:
+				self.drive_cust(0,-self.speed)
+			elif data.data == 0:
+				self.drive_cust(0,0)
+
+
+
+
+
+
+
+
+if __name__ == '__main__':
+    ms = Robot()
